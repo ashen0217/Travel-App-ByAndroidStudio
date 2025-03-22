@@ -1,0 +1,244 @@
+name: Kotlin Multiplatform CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # Workflow block for building Android
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Android
+        run: ./gradlew assembleRelease --info
+
+      - name: Run Unit Tests
+        run: ./gradlew test
+
+      - name: Build iOS shared code
+        run: ./gradlew :composeApp:compileKotlinIosSimulatorArm64
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: composeApp/build/outputs/apk/release/*.apk
+
+  # Workflow block for building iOS
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Install Xcode Command Line Tools
+        run: |
+          if ! xcode-select --print-path > /dev/null 2>&1; then
+            echo "Xcode Command Line Tools are not installed. Installing..."
+            xcode-select --install || echo "Failed to install Xcode Command Line Tools"
+          else
+            echo "Xcode Command Line Tools are already installed"
+          fi
+
+      - name: Build iOS
+        run: |
+          xcodebuild -allowProvisioningUpdates \
+            -workspace iosApp/iosApp.xcodeproj/project.xcworkspace \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            build CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: List Xcode build products
+        run: |
+          echo "Listing contents of the DerivedData directory:"
+          ls -R ~/Library/Developer/Xcode/DerivedData
+
+      - name: Find the latest .app file
+        id: find-app
+        run: |
+          # Find all .app directories and sort them by modification time
+          LATEST_APP=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d -print0 | xargs -0 stat -f "%m %N" | sort -nr | head -n 1 | cut -d ' ' -f 2-)
+          if [ -z "$LATEST_APP" ]; then
+            echo "Error: No .app file found!"
+            exit 1
+          fi
+          echo "Found latest .app file at $LATEST_APP"
+          echo "LATEST_APP=$LATEST_APP" >> $GITHUB_ENV
+
+      - name: Archive iOS app
+        run: |
+          cp -R "$LATEST_APP" .
+
+      - name: Upload iOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app
+          path: "*.app"
+
+  # Workflow block for building Desktop
+  build-desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Desktop
+        run: ./gradlew desktopJar
+
+      - name: Upload Desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-jar
+          path: composeApp/build/libs/*.jar
+
+  # Workflow block for building macOS
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: brew install create-dmg
+
+      - name: Build macOS app
+        run: |
+          xcodebuild -allowProvisioningUpdates -workspace iosApp/iosApp.xcodeproj/project.xcworkspace -scheme iosApp -configuration Release -sdk iphoneos -destination name='iPhone 14' build CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+
+      - name: Create DMG
+        run: |
+          ./gradlew packageDmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: composeApp/build/compose/binaries/main/dmg/*.dmg
+
+  build-msi:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Msi app
+        run: ./gradlew packageMsi
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: composeApp/build/compose/binaries/main/app/*.app
+
+  # Workflow block for building Web
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Web
+        run: ./gradlew wasmJsBrowserDistribution
+
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GH_TOKEN }}
+          publish_dir: composeApp/build/dist/wasmJs/productionExecutable
+
+      - name: Archive Web App
+        run: |
+          # Create a zip file of the productionExecutable directory
+          mkdir -p artifacts
+          zip -r artifacts/web-app.zip composeApp/build/dist/wasmJs/productionExecutable
+
+      - name: Upload Web artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-app
+          path: artifacts/web-app.zip
+
+
+  # Workflow block for generating artifact links
+  generate-artifact-links:
+    runs-on: ubuntu-latest
+    needs: [ build-android, build-ios, build-desktop,build-macos, build-msi, build-web ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get Artifact URLs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          # Get the run ID
+          RUN_ID=$(echo "${{ github.run_id }}")
+          REPO=${{ github.repository }}
+          
+          # Fetch the list of artifacts
+          ARTIFACTS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/artifacts")
+          
+          # Extract URLs for each artifact
+          echo "Artifact URLs for download:"
+          for url in $(echo "$ARTIFACTS" | jq -r '.artifacts[] | "\(.name) - \(.archive_download_url)"'); do
+            echo "$url"
+          done
